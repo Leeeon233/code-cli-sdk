@@ -23,14 +23,15 @@ export type PromptCapability =
 | "prompt/text"
 | "prompt/image"
 | "prompt/audio"
-| "prompt/video"
 
 export type UtilityCapability = 
 | "utils/generate_session_title"
-| "utils/output_token_usage"
+| "utils/token_usage"
 
 export type AgentCapability = 
+| "agent/plan"
 | "agent/mcp"
 | "agent/skill"
+| "agent/sub_agent"
 | "agent/command"
 | "agent/hook"

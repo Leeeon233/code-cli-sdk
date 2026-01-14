@@ -1,6 +1,6 @@
 import { Capability } from "./capability";
 import { EventHandler } from "./handler";
-import { ModeId, ModelId, PromptResponse, SessionId } from "./types";
+import { ContentBlock, ModeId, ModelId, PromptResponse, SessionId } from "./types";
 
 export interface ModelInfo{
     id: ModelId;
@@ -22,35 +22,35 @@ export interface Provider{
     version: string;
     // Provider 已经实现的能力集合，用于预处理能否调用对应的能力
     capabilities: Capability;
+    handler: EventHandler;
     // 提前预估可以使用的模型列表，具有时效性，用于提前展示
     estimateModels(): ModelInfo[];
     // 提前预估可以使用的模式列表，具有时效性
     estimateModes(): Mode[];
-    // 设置回调
-    setHandler(handler: EventHandler): void;
     // 启动一个会话（Session），需要 "session/new" 能力
-    newSession(): Promise<Session>;
+    newSession(options: NewSessionOptions): Promise<Session>;
+    // TODO:
     // 读取一个会话，update 会重播历史更新
-    loadSession(): Promise<Session>;
+    // loadSession(): Promise<Session>;
     // 分叉一个会话，使用不同的 sessionId 复制一个会话
-    forkSession(): Promise<Session>;
+    // forkSession(): Promise<Session>;
     // 恢复一个会话
-    resumeSession(): Promise<Session>;
-    setSessionModel():Promise<void>;
-    setSessionMode(): Promise<void>;
+    resumeSession(sessionId: SessionId, options: NewSessionOptions): Promise<Session>;
+    setSessionModel(sessionId: SessionId, modelId: ModelId):Promise<void>;
+    setSessionMode(sessionId: SessionId, modeId: ModeId): Promise<void>;
     // 中断会话
-    cancelSession(): Promise<void>;
+    cancelSession(sessionId: SessionId): Promise<void>;
     // 结束会话
-    closeSession(): Promise<void>;
+    closeSession(sessionId: SessionId): Promise<void>;
 }
 
 export interface Session{
     id: SessionId;
-    prompt(): Promise<PromptResponse>;
+    prompt(prompt: ContentBlock[]): Promise<PromptResponse>;
     // 设置会话使用的模型
-    setModel(): Promise<void>;
+    setModel(modelId: ModelId): Promise<void>;
     // 设置会话的权限模式
-    setMode(): Promise<void>;
+    setMode(modeId: ModeId): Promise<void>;
     // 中断一个会话
     cancel(): Promise<void>;
     // 结束一个会话
@@ -98,4 +98,14 @@ export type SetModelRequest = {
 export type SetModeRequest = {
     sessionId: SessionId;
     modeId: ModeId
+}
+
+export type NewSessionOptions = {
+    model?: ModelId;
+    workdir?: string;
+    mode?: ModeId;
+    systemPrompt?: string;
+    // TODO: tools
+    // TODO: MCP
+    // TODO: plugin
 }
