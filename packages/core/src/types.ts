@@ -404,9 +404,23 @@ export type PromptResponse = {
     // };
 }
 
+export type ModelUsage = {
+    inputTokens: number,
+    outputTokens: number,
+    cacheReadInputTokens: number,
+    cacheCreationInputTokens: number,
+    webSearchRequests: number,
+    costUSD:number,
+    contextWindow: number,
+    maxOutputTokens: number
+}
+
 export type UsageUpdate = {
     inputTokens: number;
     outputTokens: number;
     cacheReadInputTokens: number;
-    // TODO: more
+    cacheCreationInputTokens: number;
+    modelUsage: {
+        [modelName: string]: ModelUsage;
+    };
 }
