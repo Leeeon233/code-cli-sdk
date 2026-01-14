@@ -376,7 +376,43 @@ export type PermissionOptionId = string & {__brand: "permissionOptionId"};
  */
 export type PermissionOptionKind = "allow_once" | "allow_always" | "reject_once" | "reject_always";
 
-export type TitleGeneratedUpdate={
+export type TitleGeneratedUpdate = {
     sessionId: SessionId;
     title: string;
+}
+
+export type StopReason =
+  | "end_turn"
+  | "max_tokens"
+  | "max_turn_requests"
+  | "refusal"
+  | "cancelled";
+
+export type PromptResponse = {
+    sessionId: SessionId;
+    stopReason: StopReason
+    usage: NonNullableUsage;
+    modelUsage: {
+        [modelName: string]: ModelUsage;
+    };
+}
+
+export type NonNullableUsage = {
+    [K in keyof Usage]: NonNullable<Usage[K]>;
+};
+
+export type ModelUsage = {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    webSearchRequests: number;
+    costUSD: number;
+    contextWindow: number;
+};
+
+// TODO: better
+export interface Usage {
+    inputTokens: number;
+    outputTokens: number;
 }

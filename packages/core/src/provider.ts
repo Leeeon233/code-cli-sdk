@@ -1,6 +1,6 @@
 import { Capability } from "./capability";
 import { EventHandler } from "./handler";
-import { ModeId, ModelId, SessionId } from "./types";
+import { ModeId, ModelId, PromptResponse, SessionId } from "./types";
 
 export interface ModelInfo{
     id: ModelId;
@@ -46,7 +46,7 @@ export interface Provider{
 
 export interface Session{
     id: SessionId;
-    prompt(): Promise<void>;
+    prompt(): Promise<PromptResponse>;
     // 设置会话使用的模型
     setModel(): Promise<void>;
     // 设置会话的权限模式
