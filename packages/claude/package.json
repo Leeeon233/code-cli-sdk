@@ -17,7 +17,8 @@
     "dist"
   ],
   "scripts": {
-    "dev": "NODE_OPTIONS=--conditions=development tsx --env-file=.env src/index.ts",
+    "dev": "NODE_OPTIONS=--conditions=development tsx src/index.ts",
+    "example:claude": "NODE_OPTIONS=--conditions=development tsx example/claude-code-provider.ts",
     "build": "rollup -c rollup.config.ts --configPlugin typescript",
     "test": "vitest run"
   },

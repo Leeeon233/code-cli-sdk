@@ -1,20 +1,20 @@
 import { Capability } from "./capability";
 import { EventHandler } from "./handler";
-import { AvailableCommand, ContentBlock, ModeId, ModelId, PromptResponse, SessionId } from "./types";
+import { AvailableCommand, ContentBlock, PromptResponse, SessionId } from "./types";
 
-export interface ModelInfo{
-    modelId: ModelId;
+export interface ModelInfo {
+    modelId: string;
     name: string;
     description: string;
 }
 
-export interface Mode{
-    id: ModeId;
+export interface Mode {
+    id: string;
     name: string;
     description: string;
 }
 
-export interface Provider{
+export interface Provider {
     // Provider 名称
     name: string;
     // Provider 版本
@@ -35,31 +35,32 @@ export interface Provider{
     // forkSession(): Promise<Session>;
     // 恢复一个会话
     resumeSession(sessionId: SessionId, request: NewSessionRequest): Promise<Session>;
-    setSessionModel(sessionId: SessionId, modelId: ModelId):Promise<void>;
-    setSessionMode(sessionId: SessionId, modeId: ModeId): Promise<void>;
+    setSessionModel(sessionId: SessionId, modelId: string): Promise<void>;
+    setSessionMode(sessionId: SessionId, modeId: string): Promise<void>;
     // 中断会话
     cancelSession(sessionId: SessionId): Promise<void>;
     // 结束会话
     closeSession(sessionId: SessionId): Promise<void>;
 }
 
-export interface Session{
+export interface Session {
     id: SessionId;
     prompt(prompt: ContentBlock[]): Promise<PromptResponse>;
     // 设置会话使用的模型
-    setModel(modelId: ModelId): Promise<void>;
+    setModel(modelId: string): Promise<void>;
     // 设置会话的权限模式
-    setMode(modeId: ModeId): Promise<void>;
+    setMode(modeId: string): Promise<void>;
     // 中断一个会话
     cancel(): Promise<void>;
     // 结束一个会话
     close(): Promise<void>;
 
     getAvailableModels(): Promise<ModelInfo[]>
+    getAvailableModes(): Promise<Mode[]>
     getAvailableSlashCommands(): Promise<AvailableCommand[]>
 }
 
-export type NewSessionRequest={
+export type NewSessionRequest = {
     /**
      * The working directory for this session. Must be an absolute path.
      */
@@ -94,18 +95,18 @@ export type CancelSessionRequest = {
 
 export type SetModelRequest = {
     sessionId: SessionId;
-    modelId: ModelId
+    modelId: string
 }
 
 export type SetModeRequest = {
     sessionId: SessionId;
-    modeId: ModeId
+    modeId: string
 }
 
 export type ProviderOptions = {
-    model?: ModelId;
+    model?: string;
     workdir?: string;
-    mode?: ModeId;
+    mode?: string;
     systemPrompt?: string | { append: string };
     handler: EventHandler
     // TODO: tools

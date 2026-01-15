@@ -1,4 +1,4 @@
-import { Capability, ContentBlock, EventHandler, Mode, ModeId, ModelId, ModelInfo, NewSessionRequest, PromptResponse, Provider, ProviderOptions, Session, SessionId, Pushable, AvailableCommand, Logger, RequestError, SessionNotification, PlanEntry, emitUpdate } from "@code-cli-sdk/core"
+import { Capability, ContentBlock, EventHandler, Mode, ModelInfo, NewSessionRequest, PromptResponse, Provider, ProviderOptions, Session, SessionId, Pushable, AvailableCommand, Logger, RequestError, SessionNotification, PlanEntry, emitUpdate } from "@code-cli-sdk/core"
 import { query, Query, Options, PermissionResult, SDKUserMessage, PermissionMode, PermissionUpdate, SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
@@ -8,10 +8,51 @@ import { EDIT_TOOL_NAMES, registerHookCallback, toolInfoFromToolUse, toolUpdateF
 export const CLAUDE_CAPABILITY = {
   session: ["session/resume", "session/set_model", "session/set_mode", "session/cancel", "session/resume"],
   auth: [],
-  utils: [],
+  utils: ["utils/token_usage"],
   prompt: ["prompt/system_prompt", "prompt/text", "prompt/image"],
   agent: ["agent/plan"]
 } as Capability;
+
+const ESTIMATE_MODELS = [
+  {
+    modelId: 'default',
+    name: 'Default (recommended)',
+    description: 'Use the default model (currently Sonnet 4.5) · $3/$15 per Mtok'
+  },
+  {
+    modelId: 'opus',
+    name: 'Opus',
+    description: 'Opus 4.5 · Most capable for complex work · $5/$25 per Mtok'
+  },
+  {
+    modelId: 'haiku',
+    name: 'Haiku',
+    description: 'Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok'
+  }
+]
+
+const ESTIMATE_MODES = [
+  {
+    id: "default",
+    name: "Default",
+    description: "Standard behavior, prompts for dangerous operations",
+  },
+  {
+    id: "acceptEdits",
+    name: "Accept Edits",
+    description: "Auto-accept file edit operations",
+  },
+  {
+    id: "plan",
+    name: "Plan Mode",
+    description: "Planning mode, no actual tool execution",
+  },
+  {
+    id: "dontAsk",
+    name: "Don't Ask",
+    description: "Don't prompt for permissions, deny if not pre-approved",
+  },
+];
 
 interface ClaudeCodeSessionOptions {
   query: Query;
@@ -36,7 +77,7 @@ export class ClaudeCodeSession implements Session {
   }
 
   async prompt(prompt: ContentBlock[]): Promise<PromptResponse> {
-    const result = this.promptInternal(prompt);
+    const result = await this.promptInternal(prompt);
     // TODO: usage
     // TODO: quota
     return result
@@ -83,6 +124,16 @@ export class ClaudeCodeSession implements Session {
               if (message.is_error) {
                 throw RequestError.internalError(undefined, message.result);
               }
+              const usage = message.usage;
+              await this.handler.usageUpdate({
+                sessionId: this.id,
+                modelUsage: message.modelUsage,
+                inputTokens: usage.input_tokens,
+                outputTokens: usage.output_tokens,
+                cacheReadInputTokens: usage.cache_read_input_tokens,
+                cacheCreationInputTokens: usage.cache_creation_input_tokens,
+                total_cost_usd: message.total_cost_usd
+              })
               return { sessionId: this.id, stopReason: "end_turn" };
             }
             case "error_during_execution":
@@ -195,11 +246,11 @@ export class ClaudeCodeSession implements Session {
     throw new Error("Session did not end in result");
   }
 
-  async setModel(modelId: ModelId): Promise<void> {
+  async setModel(modelId: string): Promise<void> {
     await this.query.setModel(modelId);
   }
 
-  async setMode(modeId: ModeId): Promise<void> {
+  async setMode(modeId: string): Promise<void> {
     this.permissionMode = modeId as PermissionMode;
     await this.query.setPermissionMode(modeId as PermissionMode)
   }
@@ -219,11 +270,15 @@ export class ClaudeCodeSession implements Session {
     const defaultModel = models[0];
     await this.query.setModel(defaultModel.value);
     const availableModels = models.map((model) => ({
-      modelId: model.value as ModelId,
+      modelId: model.value,
       name: model.displayName,
       description: model.description,
     }));
     return availableModels
+  }
+
+  async getAvailableModes(): Promise<Mode[]> {
+    return ESTIMATE_MODES
   }
 
   async getAvailableSlashCommands(): Promise<AvailableCommand[]> {
@@ -266,11 +321,11 @@ export class ClaudeCodeProvider implements Provider {
   }
 
   estimateModels(): ModelInfo[] {
-    throw new Error("Method not implemented.");
+    return ESTIMATE_MODELS
   }
 
   estimateModes(): Mode[] {
-    throw new Error("Method not implemented.");
+    return ESTIMATE_MODES
   }
 
   async newSession(request: NewSessionRequest): Promise<Session> {
@@ -284,7 +339,7 @@ export class ClaudeCodeProvider implements Provider {
   /*
    * throw if the session not exist
    */
-  async setSessionModel(sessionId: SessionId, modelId: ModelId): Promise<void> {
+  async setSessionModel(sessionId: SessionId, modelId: string): Promise<void> {
     const session = this.sessions[sessionId];
     if (!session) {
       throw new Error(`SessionId(${sessionId}) is not exist`)
@@ -295,7 +350,7 @@ export class ClaudeCodeProvider implements Provider {
   /*
    * throw if the session not exist
    */
-  async setSessionMode(sessionId: SessionId, modeId: ModeId): Promise<void> {
+  async setSessionMode(sessionId: SessionId, modeId: string): Promise<void> {
     const session = this.sessions[sessionId];
     if (!session) {
       throw new Error(`SessionId(${sessionId}) is not exist`)
@@ -422,7 +477,7 @@ export class ClaudeCodeProvider implements Provider {
           session.permissionMode = response.optionId;
           await this.handler.modeUpdate({
             sessionId,
-            currentModeId: response.optionId as ModeId,
+            currentModeId: response.optionId
           });
 
           return {

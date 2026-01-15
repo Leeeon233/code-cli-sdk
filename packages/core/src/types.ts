@@ -1,6 +1,4 @@
 export type SessionId = string & { __brand: "sessionId" }
-export type ModelId = string & { _brand: "modelId" }
-export type ModeId = string & { _brand: "modeId" }
 /**
  * The sender or recipient of messages and data in a conversation.
  */
@@ -382,7 +380,7 @@ export type CurrentModeUpdate = {
     /**
      * The ID of the current mode
      */
-    currentModeId: ModeId;
+    currentModeId: string;
 };
 /**
 * Available commands are ready or have changed
@@ -559,6 +557,7 @@ export type UsageUpdate = {
     outputTokens: number;
     cacheReadInputTokens: number;
     cacheCreationInputTokens: number;
+    total_cost_usd: number;
     modelUsage: {
         [modelName: string]: ModelUsage;
     };
