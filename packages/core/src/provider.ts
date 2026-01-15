@@ -1,9 +1,9 @@
 import { Capability } from "./capability";
 import { EventHandler } from "./handler";
-import { ContentBlock, ModeId, ModelId, PromptResponse, SessionId } from "./types";
+import { AvailableCommand, ContentBlock, ModeId, ModelId, PromptResponse, SessionId } from "./types";
 
 export interface ModelInfo{
-    id: ModelId;
+    modelId: ModelId;
     name: string;
     description: string;
 }
@@ -14,12 +14,11 @@ export interface Mode{
     description: string;
 }
 
-
 export interface Provider{
     // Provider 名称
     name: string;
     // Provider 版本
-    version: string;
+    // version: string;
     // Provider 已经实现的能力集合，用于预处理能否调用对应的能力
     capabilities: Capability;
     handler: EventHandler;
@@ -28,14 +27,14 @@ export interface Provider{
     // 提前预估可以使用的模式列表，具有时效性
     estimateModes(): Mode[];
     // 启动一个会话（Session），需要 "session/new" 能力
-    newSession(options: NewSessionOptions): Promise<Session>;
+    newSession(request: NewSessionRequest): Promise<Session>;
     // TODO:
     // 读取一个会话，update 会重播历史更新
     // loadSession(): Promise<Session>;
     // 分叉一个会话，使用不同的 sessionId 复制一个会话
     // forkSession(): Promise<Session>;
     // 恢复一个会话
-    resumeSession(sessionId: SessionId, options: NewSessionOptions): Promise<Session>;
+    resumeSession(sessionId: SessionId, request: NewSessionRequest): Promise<Session>;
     setSessionModel(sessionId: SessionId, modelId: ModelId):Promise<void>;
     setSessionMode(sessionId: SessionId, modeId: ModeId): Promise<void>;
     // 中断会话
@@ -55,6 +54,9 @@ export interface Session{
     cancel(): Promise<void>;
     // 结束一个会话
     close(): Promise<void>;
+
+    getAvailableModels(): Promise<ModelInfo[]>
+    getAvailableSlashCommands(): Promise<AvailableCommand[]>
 }
 
 export type NewSessionRequest={
@@ -100,11 +102,12 @@ export type SetModeRequest = {
     modeId: ModeId
 }
 
-export type NewSessionOptions = {
+export type ProviderOptions = {
     model?: ModelId;
     workdir?: string;
     mode?: ModeId;
-    systemPrompt?: string;
+    systemPrompt?: string | { append: string };
+    handler: EventHandler
     // TODO: tools
     // TODO: MCP
     // TODO: plugin

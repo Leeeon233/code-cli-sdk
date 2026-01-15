@@ -242,10 +242,11 @@ export type PlanEntryStatus = "pending" | "in_progress" | "completed";
  * See protocol docs: [Session Modes](https://agentclientprotocol.com/protocol/session-modes)
  */
 export type CurrentModeUpdate = {
+    sessionId: SessionId;
     /**
      * The ID of the current mode
      */
-    currentModeId: ModelId;
+    currentModeId: ModeId;
 };
 /**
 * Available commands are ready or have changed
@@ -368,7 +369,7 @@ export type PermissionOption = {
 /**
  * Unique identifier for a permission option.
  */
-export type PermissionOptionId = string & {__brand: "permissionOptionId"};
+export type PermissionOptionId = string;
 /**
  * The type of permission option being presented to the user.
  *

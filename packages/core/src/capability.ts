@@ -3,6 +3,7 @@ export type Capability = {
     auth: AuthCapability[];
     prompt: PromptCapability[];
     utils: UtilityCapability[];
+    agent: AgentCapability[];
 }
 
 export type AuthCapability = 
@@ -10,7 +11,6 @@ export type AuthCapability =
 | "auth/api_key"
 
 export type SessionCapability =
-| "session/prompt"
 | "session/load"
 | "session/resume"
 | "session/fork"
