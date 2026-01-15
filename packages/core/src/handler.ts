@@ -1,7 +1,7 @@
-import { AvailableCommandsUpdate, CurrentModeUpdate, Plan, RequestPermissionRequest, RequestPermissionResponse, SessionUpdateNotification, TitleGeneratedUpdate, UsageUpdate } from "./types";
+import { AvailableCommandsUpdate, CurrentModeUpdate, Plan, RequestPermissionRequest, RequestPermissionResponse, SessionNotification, TitleGeneratedUpdate, UsageUpdate } from "./types";
 
-export interface EventHandler{
-    sessionUpdate(update: SessionUpdateNotification):Promise<void>;
+export interface EventHandler {
+    sessionUpdate(update: SessionNotification): Promise<void>;
     planUpdate(update: Plan): Promise<void>;
     requestPermission(request: RequestPermissionRequest): Promise<RequestPermissionResponse>;
     titleGenerated(update: TitleGeneratedUpdate): Promise<void>;

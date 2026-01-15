@@ -1,18 +1,21 @@
-import { Capability, ContentBlock, EventHandler, Mode, ModeId, ModelId, ModelInfo, NewSessionRequest, PromptResponse, Provider, ProviderOptions, Session, SessionId, Pushable, AvailableCommand, ToolCallContent, ToolKind, ToolCallLocation } from "@code-cli-sdk/core"
-import { query, Query, Options, PermissionResult, SDKUserMessage, PermissionMode, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
+import { Capability, ContentBlock, EventHandler, Mode, ModeId, ModelId, ModelInfo, NewSessionRequest, PromptResponse, Provider, ProviderOptions, Session, SessionId, Pushable, AvailableCommand, ToolCallContent, ToolKind, ToolCallLocation, Logger, RequestError, SessionNotification, PlanEntry } from "@code-cli-sdk/core"
+import { query, Query, Options, PermissionResult, SDKUserMessage, PermissionMode, PermissionUpdate, SDKMessage, SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-
+import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
+import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
+import { EDIT_TOOL_NAMES, registerHookCallback, toolInfoFromToolUse, toolUpdateFromToolResult } from "./tool";
 
 export const CLAUDE_CAPABILITY = {
-  session: [],
+  session: ["session/resume", "session/set_model", "session/set_mode", "session/cancel", "session/resume"],
   auth: [],
   utils: [],
-  prompt: ["prompt/system_prompt"],
-  agent: []
+  prompt: ["prompt/system_prompt", "prompt/text", "prompt/image"],
+  agent: ["agent/plan"]
 } as Capability;
 
 interface ClaudeCodeSessionOptions {
   query: Query;
+  input: Pushable<SDKUserMessage>
   sessionId: SessionId;
   handler: EventHandler;
 }
@@ -22,27 +25,187 @@ export class ClaudeCodeSession implements Session {
   handler: EventHandler;
   cancelled: boolean = false;
   query: Query;
+  toolUseCache: ToolUseCache;
+  logger: Logger = console;
   public permissionMode: PermissionMode = "default";
-  constructor(options: ClaudeCodeSessionOptions) {
+  constructor(private options: ClaudeCodeSessionOptions) {
     this.id = options.sessionId
     this.handler = options.handler
     this.query = options.query
+    this.toolUseCache = {}
   }
 
-  prompt(prompt: ContentBlock[]): Promise<PromptResponse> {
-    throw new Error("Method not implemented.");
+  async prompt(prompt: ContentBlock[]): Promise<PromptResponse> {
+    const input = this.options.input;
+    const query = this.query;
+    input.push(promptToClaude(prompt, this.id));
+    while (true) {
+      const { value: message, done } = await query.next();
+      if (done || !message) {
+        if (this.cancelled) {
+          return { sessionId: this.id, stopReason: "cancelled" };
+        }
+        break;
+      }
+
+      switch (message.type) {
+        case "system":
+          switch (message.subtype) {
+            case "init":
+              break;
+            case "compact_boundary":
+            case "hook_response":
+            case "status":
+              // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
+              break;
+            default:
+              unreachable(message, this.logger);
+              break;
+          }
+          break;
+        case "result": {
+          if (this.cancelled) {
+            return { sessionId: this.id, stopReason: "cancelled" };
+          }
+
+          switch (message.subtype) {
+            case "success": {
+              if (message.result.includes("Please run /login")) {
+                throw RequestError.authRequired(undefined, undefined);
+              }
+              if (message.is_error) {
+                throw RequestError.internalError(undefined, message.result);
+              }
+              return { sessionId: this.id, stopReason: "end_turn" };
+            }
+            case "error_during_execution":
+              if (message.is_error) {
+                throw RequestError.internalError(
+                  undefined,
+                  message.errors.join(", ") || message.subtype,
+                );
+              }
+              return { sessionId: this.id, stopReason: "end_turn" };
+            case "error_max_budget_usd":
+            case "error_max_turns":
+            case "error_max_structured_output_retries":
+              if (message.is_error) {
+                throw RequestError.internalError(
+                  undefined,
+                  message.errors.join(", ") || message.subtype,
+                );
+              }
+              return { sessionId: this.id, stopReason: "max_turn_requests" };
+            default:
+              unreachable(message, this.logger);
+              break;
+          }
+          break;
+        }
+        case "stream_event": {
+          for (const notification of streamEventToAcpNotifications(
+            message,
+            this.id,
+            this.toolUseCache,
+            this.handler,
+            this.logger
+          )) {
+            await this.handler.sessionUpdate(notification);
+          }
+          break;
+        }
+        case "user":
+        case "assistant": {
+          if (this.cancelled) {
+            break;
+          }
+
+          // Slash commands like /compact can generate invalid output... doesn't match
+          // their own docs: https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-slash-commands#%2Fcompact-compact-conversation-history
+          if (
+            typeof message.message.content === "string" &&
+            message.message.content.includes("<local-command-stdout>")
+          ) {
+            this.logger.log(message.message.content);
+            break;
+          }
+
+          if (
+            typeof message.message.content === "string" &&
+            message.message.content.includes("<local-command-stderr>")
+          ) {
+            this.logger.error(message.message.content);
+            break;
+          }
+          // Skip these user messages for now, since they seem to just be messages we don't want in the feed
+          if (
+            message.type === "user" &&
+            (typeof message.message.content === "string" ||
+              (Array.isArray(message.message.content) &&
+                message.message.content.length === 1 &&
+                message.message.content[0].type === "text"))
+          ) {
+            break;
+          }
+
+          if (
+            message.type === "assistant" &&
+            message.message.model === "<synthetic>" &&
+            Array.isArray(message.message.content) &&
+            message.message.content.length === 1 &&
+            message.message.content[0].type === "text" &&
+            message.message.content[0].text.includes("Please run /login")
+          ) {
+            throw RequestError.authRequired(undefined, undefined);
+          }
+
+          const content =
+            message.type === "assistant"
+              ? // Handled by stream events above
+              message.message.content.filter((item) => !["text", "thinking"].includes(item.type))
+              : message.message.content;
+
+          for (const notification of toAcpNotifications(
+            content,
+            message.message.role,
+            this.id,
+            this.toolUseCache,
+            this.handler,
+            this.logger,
+          )) {
+            await this.handler.sessionUpdate(notification);
+          }
+          break;
+        }
+        case "tool_progress":
+          break;
+        case "auth_status":
+          break;
+        default:
+          unreachable(message);
+          break;
+      }
+    }
+    throw new Error("Session did not end in result");
   }
-  setModel(modelId: ModelId): Promise<void> {
-    throw new Error("Method not implemented.");
+
+  async setModel(modelId: ModelId): Promise<void> {
+    await this.query.setModel(modelId);
   }
-  setMode(modeId: ModeId): Promise<void> {
-    throw new Error("Method not implemented.");
+
+  async setMode(modeId: ModeId): Promise<void> {
+    this.permissionMode = modeId as PermissionMode;
+    await this.query.setPermissionMode(modeId as PermissionMode)
   }
-  cancel(): Promise<void> {
-    throw new Error("Method not implemented.");
+
+  async cancel(): Promise<void> {
+    this.cancelled = true;
+    await this.query.interrupt()
   }
-  close(): Promise<void> {
-    throw new Error("Method not implemented.");
+
+  async close(): Promise<void> {
+    if (this.cancelled) return;
+    await this.cancel();
   }
 
   async getAvailableModels(): Promise<ModelInfo[]> {
@@ -99,12 +262,68 @@ export class ClaudeCodeProvider implements Provider {
   estimateModels(): ModelInfo[] {
     throw new Error("Method not implemented.");
   }
+
   estimateModes(): Mode[] {
     throw new Error("Method not implemented.");
   }
+
   async newSession(request: NewSessionRequest): Promise<Session> {
-    const sessionId = randomUUID() as SessionId;
-    const options = this.buildOptions(sessionId);
+    return this.createSession(request.cwd)
+  }
+
+  async resumeSession(sessionId: SessionId, request: NewSessionRequest): Promise<Session> {
+    return this.createSession(request.cwd, sessionId)
+  }
+
+  /*
+   * throw if the session not exist
+   */
+  async setSessionModel(sessionId: SessionId, modelId: ModelId): Promise<void> {
+    const session = this.sessions[sessionId];
+    if (!session) {
+      throw new Error(`SessionId(${sessionId}) is not exist`)
+    }
+    await session.setModel(modelId);
+  }
+
+  /*
+   * throw if the session not exist
+   */
+  async setSessionMode(sessionId: SessionId, modeId: ModeId): Promise<void> {
+    const session = this.sessions[sessionId];
+    if (!session) {
+      throw new Error(`SessionId(${sessionId}) is not exist`)
+    }
+    await session.setMode(modeId);
+  }
+  /*
+   * throw if the session not exist
+   */
+  async cancelSession(sessionId: SessionId): Promise<void> {
+    const session = this.sessions[sessionId];
+    if (!session) {
+      throw new Error(`SessionId(${sessionId}) is not exist`)
+    }
+    await session.cancel();
+  }
+
+  async closeSession(sessionId: SessionId): Promise<void> {
+    const session = this.sessions[sessionId];
+    if (!session) {
+      throw new Error(`SessionId(${sessionId}) is not exist`)
+    }
+    await session.close();
+    delete this.sessions[sessionId];
+  }
+
+  private createSession(cwd?: string, resume?: SessionId, fork?: boolean): ClaudeCodeSession {
+    let sessionId: SessionId;
+    if (resume) {
+      sessionId = resume;
+    } else {
+      sessionId = randomUUID() as SessionId;
+    }
+    const options = this.buildOptions(sessionId, cwd, resume, fork);
     const input = new Pushable<SDKUserMessage>();
     const q = query({
       prompt: input,
@@ -113,53 +332,20 @@ export class ClaudeCodeProvider implements Provider {
     const session = new ClaudeCodeSession({
       sessionId,
       query: q,
+      input,
       handler: this.options.handler
     })
     this.sessions[sessionId] = session;
     return session;
   }
-  resumeSession(sessionId: SessionId, request: NewSessionRequest): Promise<Session> {
-    throw new Error("Method not implemented.");
-  }
-  setSessionModel(sessionId: SessionId, modelId: ModelId): Promise<void> {
-    throw new Error("Method not implemented.");
-  }
-  setSessionMode(sessionId: SessionId, modeId: ModeId): Promise<void> {
-    throw new Error("Method not implemented.");
-  }
-  cancelSession(sessionId: SessionId): Promise<void> {
-    throw new Error("Method not implemented.");
-  }
-  closeSession(sessionId: SessionId): Promise<void> {
-    throw new Error("Method not implemented.");
-  }
 
   private canUseTool(sessionId: SessionId,) {
     return async (toolName: string, toolInput: Record<string, unknown>, {
-      /** Signaled if the operation should be aborted. */
       signal,
-      /**
-       * Suggestions for updating permissions so that the user will not be
-       * prompted again for this tool during this session.
-       *
-       * Typically if presenting the user an option 'always allow' or similar,
-       * then this full set of suggestions should be returned as the
-       * `updatedPermissions` in the PermissionResult.
-       */
       suggestions,
-      /**
-       * The file path that triggered the permission request, if applicable.
-       * For example, when a Bash command tries to access a path outside allowed directories.
-       */
       blockedPath,
-      /** Explains why this permission request was triggered. */
       decisionReason,
-      /**
-       * Unique identifier for this specific tool call within the assistant message.
-       * Multiple tool calls in the same assistant message will have different toolUseIDs.
-       */
       toolUseID,
-      /** If running within the context of a sub-agent, the sub-agent's ID. */
       agentID
     }: {
       /** Signaled if the operation should be aborted. */
@@ -188,6 +374,11 @@ export class ClaudeCodeProvider implements Provider {
       /** If running within the context of a sub-agent, the sub-agent's ID. */
       agentID?: string;
     }): Promise<PermissionResult> => {
+      void suggestions;
+      void blockedPath;
+      void decisionReason;
+      void agentID;
+
       const session = this.sessions[sessionId];
       if (!session) {
         return {
@@ -310,7 +501,7 @@ export class ClaudeCodeProvider implements Provider {
     }
   }
 
-  private buildOptions(sessionId: SessionId, resume?: SessionId, fork?: boolean) {
+  private buildOptions(sessionId: SessionId, cwd?: string, resume?: SessionId, fork?: boolean) {
     // system prompt
     let systemPrompt: Options["systemPrompt"] = { type: "preset", preset: "claude_code" };
     if (this.options.systemPrompt) {
@@ -339,7 +530,7 @@ export class ClaudeCodeProvider implements Provider {
       settingSources: ["user", "project", "local"],
       permissionMode: "default",
       stderr: (err) => this.options.handler.error(new Error(err)),
-      cwd: this.options.workdir,
+      cwd,
       includePartialMessages: true,
       canUseTool: this.canUseTool(sessionId),
       resume,
@@ -353,389 +544,340 @@ export class ClaudeCodeProvider implements Provider {
   }
 }
 
-const acpUnqualifiedToolNames = {
-  read: "Read",
-  edit: "Edit",
-  write: "Write",
-  bash: "Bash",
-  killShell: "KillShell",
-  bashOutput: "BashOutput",
-};
+export function promptToClaude(prompt: ContentBlock[], sessionId: SessionId): SDKUserMessage {
+  const content: any[] = [];
+  const context: any[] = [];
 
-export const ACP_TOOL_NAME_PREFIX = "mcp__acp__";
-export const acpToolNames = {
-  read: ACP_TOOL_NAME_PREFIX + acpUnqualifiedToolNames.read,
-  edit: ACP_TOOL_NAME_PREFIX + acpUnqualifiedToolNames.edit,
-  write: ACP_TOOL_NAME_PREFIX + acpUnqualifiedToolNames.write,
-  bash: ACP_TOOL_NAME_PREFIX + acpUnqualifiedToolNames.bash,
-  killShell: ACP_TOOL_NAME_PREFIX + acpUnqualifiedToolNames.killShell,
-  bashOutput: ACP_TOOL_NAME_PREFIX + acpUnqualifiedToolNames.bashOutput,
-};
-
-export const EDIT_TOOL_NAMES = [acpToolNames.edit, acpToolNames.write];
-
-interface ToolInfo {
-  title: string;
-  kind: ToolKind;
-  content: ToolCallContent[];
-  locations?: ToolCallLocation[];
-}
-
-interface ToolUpdate {
-  title?: string;
-  content?: ToolCallContent[];
-  locations?: ToolCallLocation[];
-}
-
-export function toolInfoFromToolUse(toolUse: any): ToolInfo {
-  const name = toolUse.name;
-  const input = toolUse.input;
-
-  switch (name) {
-    case "Task":
-      return {
-        title: input?.description ? input.description : "Task",
-        kind: "think",
-        content:
-          input && input.prompt
-            ? [
-              {
-                type: "content",
-                content: { type: "text", text: input.prompt },
-              },
-            ]
-            : [],
-      };
-
-    case "NotebookRead":
-      return {
-        title: input?.notebook_path ? `Read Notebook ${input.notebook_path}` : "Read Notebook",
-        kind: "read",
-        content: [],
-        locations: input?.notebook_path ? [{ path: input.notebook_path }] : [],
-      };
-
-    case "NotebookEdit":
-      return {
-        title: input?.notebook_path ? `Edit Notebook ${input.notebook_path}` : "Edit Notebook",
-        kind: "edit",
-        content:
-          input && input.new_source
-            ? [
-              {
-                type: "content",
-                content: { type: "text", text: input.new_source },
-              },
-            ]
-            : [],
-        locations: input?.notebook_path ? [{ path: input.notebook_path }] : [],
-      };
-
-    case "Bash":
-    case acpToolNames.bash:
-      return {
-        title: input?.command ? "`" + input.command.replaceAll("`", "\\`") + "`" : "Terminal",
-        kind: "execute",
-        content:
-          input && input.description
-            ? [
-              {
-                type: "content",
-                content: { type: "text", text: input.description },
-              },
-            ]
-            : [],
-      };
-
-    case "BashOutput":
-    case acpToolNames.bashOutput:
-      return {
-        title: "Tail Logs",
-        kind: "execute",
-        content: [],
-      };
-
-    case "KillShell":
-    case acpToolNames.killShell:
-      return {
-        title: "Kill Process",
-        kind: "execute",
-        content: [],
-      };
-
-    case acpToolNames.read: {
-      let limit = "";
-      if (input.limit) {
-        limit =
-          " (" + ((input.offset ?? 0) + 1) + " - " + ((input.offset ?? 0) + input.limit) + ")";
-      } else if (input.offset) {
-        limit = " (from line " + (input.offset + 1) + ")";
-      }
-      return {
-        title: "Read " + (input.file_path ?? "File") + limit,
-        kind: "read",
-        locations: input.file_path
-          ? [
-            {
-              path: input.file_path,
-              line: input.offset ?? 0,
-            },
-          ]
-          : [],
-        content: [],
-      };
-    }
-
-    case "Read":
-      return {
-        title: "Read File",
-        kind: "read",
-        content: [],
-        locations: input.file_path
-          ? [
-            {
-              path: input.file_path,
-              line: input.offset ?? 0,
-            },
-          ]
-          : [],
-      };
-
-    case "LS":
-      return {
-        title: `List the ${input?.path ? "`" + input.path + "`" : "current"} directory's contents`,
-        kind: "search",
-        content: [],
-        locations: [],
-      };
-
-    case acpToolNames.edit:
-    case "Edit": {
-      const path = input?.file_path ?? input?.file_path;
-
-      return {
-        title: path ? `Edit \`${path}\`` : "Edit",
-        kind: "edit",
-        content:
-          input && path
-            ? [
-              {
-                type: "diff",
-                path,
-                oldText: input.old_string ?? null,
-                newText: input.new_string ?? "",
-              },
-            ]
-            : [],
-        locations: path ? [{ path }] : undefined,
-      };
-    }
-
-    case acpToolNames.write: {
-      let content: ToolCallContent[];
-      if (input && input.file_path) {
-        content = [
-          {
-            type: "diff",
-            path: input.file_path,
-            oldText: null,
-            newText: input.content,
-          },
-        ] as ToolCallContent[];
-      } else if (input && input.content) {
-        content = [
-          {
-            type: "content",
-            content: { type: "text", text: input.content },
-          },
-        ] as ToolCallContent[];
-      }
-      return {
-        title: input?.file_path ? `Write ${input.file_path}` : "Write",
-        kind: "edit",
-        content,
-        locations: input?.file_path ? [{ path: input.file_path }] : [],
-      };
-    }
-
-    case "Write":
-      return {
-        title: input?.file_path ? `Write ${input.file_path}` : "Write",
-        kind: "edit",
-        content:
-          input && input.file_path
-            ? [
-              {
-                type: "diff",
-                path: input.file_path,
-                oldText: null,
-                newText: input.content,
-              },
-            ]
-            : [],
-        locations: input?.file_path ? [{ path: input.file_path }] : [],
-      };
-
-    case "Glob": {
-      let label = "Find";
-      if (input.path) {
-        label += ` \`${input.path}\``;
-      }
-      if (input.pattern) {
-        label += ` \`${input.pattern}\``;
-      }
-      return {
-        title: label,
-        kind: "search",
-        content: [],
-        locations: input.path ? [{ path: input.path }] : [],
-      };
-    }
-
-    case "Grep": {
-      let label = "grep";
-
-      if (input["-i"]) {
-        label += " -i";
-      }
-      if (input["-n"]) {
-        label += " -n";
-      }
-
-      if (input["-A"] !== undefined) {
-        label += ` -A ${input["-A"]}`;
-      }
-      if (input["-B"] !== undefined) {
-        label += ` -B ${input["-B"]}`;
-      }
-      if (input["-C"] !== undefined) {
-        label += ` -C ${input["-C"]}`;
-      }
-
-      if (input.output_mode) {
-        switch (input.output_mode) {
-          case "FilesWithMatches":
-            label += " -l";
-            break;
-          case "Count":
-            label += " -c";
-            break;
-          case "Content":
-          default:
-            break;
+  for (const chunk of prompt) {
+    switch (chunk.type) {
+      case "text": {
+        let text = chunk.text;
+        // change /mcp:server:command args -> /server:command (MCP) args
+        const mcpMatch = text.match(/^\/mcp:([^:\s]+):(\S+)(\s+.*)?$/);
+        if (mcpMatch) {
+          const [, server, command, args] = mcpMatch;
+          text = `/${server}:${command} (MCP)${args || ""}`;
         }
+        content.push({ type: "text", text });
+        break;
       }
-
-      if (input.head_limit !== undefined) {
-        label += ` | head -${input.head_limit}`;
+      case "resource_link": {
+        const formattedUri = formatUriAsLink(chunk.uri);
+        content.push({
+          type: "text",
+          text: formattedUri,
+        });
+        break;
       }
-
-      if (input.glob) {
-        label += ` --include="${input.glob}"`;
+      case "resource": {
+        if ("text" in chunk.resource) {
+          const formattedUri = formatUriAsLink(chunk.resource.uri);
+          content.push({
+            type: "text",
+            text: formattedUri,
+          });
+          context.push({
+            type: "text",
+            text: `\n<context ref="${chunk.resource.uri}">\n${chunk.resource.text}\n</context>`,
+          });
+        }
+        // Ignore blob resources (unsupported)
+        break;
       }
-
-      if (input.type) {
-        label += ` --type=${input.type}`;
-      }
-
-      if (input.multiline) {
-        label += " -P";
-      }
-
-      if (input.pattern) {
-        label += ` "${input.pattern}"`;
-      }
-
-      if (input.path) {
-        label += ` ${input.path}`;
-      }
-
-      return {
-        title: label,
-        kind: "search",
-        content: [],
-      };
-    }
-
-    case "WebFetch":
-      return {
-        title: input?.url ? `Fetch ${input.url}` : "Fetch",
-        kind: "fetch",
-        content:
-          input && input.prompt
-            ? [
-              {
-                type: "content",
-                content: { type: "text", text: input.prompt },
-              },
-            ]
-            : [],
-      };
-
-    case "WebSearch": {
-      let label = `"${input.query}"`;
-
-      if (input.allowed_domains && input.allowed_domains.length > 0) {
-        label += ` (allowed: ${input.allowed_domains.join(", ")})`;
-      }
-
-      if (input.blocked_domains && input.blocked_domains.length > 0) {
-        label += ` (blocked: ${input.blocked_domains.join(", ")})`;
-      }
-
-      return {
-        title: label,
-        kind: "fetch",
-        content: [],
-      };
-    }
-
-    case "TodoWrite":
-      return {
-        title: Array.isArray(input?.todos)
-          ? `Update TODOs: ${input.todos.map((todo: any) => todo.content).join(", ")}`
-          : "Update TODOs",
-        kind: "think",
-        content: [],
-      };
-
-    case "ExitPlanMode":
-      return {
-        title: "Ready to code?",
-        kind: "switch_mode",
-        content:
-          input && input.plan
-            ? [{ type: "content", content: { type: "text", text: input.plan } }]
-            : [],
-      };
-
-    case "Other": {
-      let output;
-      try {
-        output = JSON.stringify(input, null, 2);
-      } catch {
-        output = typeof input === "string" ? input : "{}";
-      }
-      return {
-        title: name || "Unknown Tool",
-        kind: "other",
-        content: [
-          {
-            type: "content",
-            content: {
-              type: "text",
-              text: `\`\`\`json\n${output}\`\`\``,
+      case "image":
+        if (chunk.data) {
+          content.push({
+            type: "image",
+            source: {
+              type: "base64",
+              data: chunk.data,
+              media_type: chunk.mimeType,
             },
-          },
-        ],
-      };
+          });
+        } else if (chunk.uri && chunk.uri.startsWith("http")) {
+          content.push({
+            type: "image",
+            source: {
+              type: "url",
+              url: chunk.uri,
+            },
+          });
+        }
+        break;
+      // Ignore audio and other unsupported types
+      default:
+        break;
     }
+  }
 
-    default:
-      return {
-        title: name || "Unknown Tool",
-        kind: "other",
-        content: [],
-      };
+  content.push(...context);
+
+  return {
+    type: "user",
+    message: {
+      role: "user",
+      content: content,
+    },
+    session_id: sessionId,
+    parent_tool_use_id: null,
+  };
+}
+function formatUriAsLink(uri: string): string {
+  try {
+    if (uri.startsWith("file://")) {
+      const path = uri.slice(7); // Remove "file://"
+      const name = path.split("/").pop() || path;
+      return `[@${name}](${uri})`;
+    }
+    return uri;
+  } catch {
+    return uri;
   }
 }
+
+export function unreachable(value: never, logger: Logger = console) {
+  let valueAsString: string;
+  try {
+    valueAsString = JSON.stringify(value);
+  } catch {
+    valueAsString = value;
+  }
+  logger.error(`Unexpected case: ${valueAsString}`);
+}
+
+/**
+ * Convert an SDKAssistantMessage (Claude) to a SessionNotification (ACP).
+ * Only handles text, image, and thinking chunks for now.
+ */
+export function toAcpNotifications(
+  content: string | ContentBlockParam[] | BetaContentBlock[] | BetaRawContentBlockDelta[],
+  role: "assistant" | "user",
+  sessionId: SessionId,
+  toolUseCache: ToolUseCache,
+  handler: EventHandler,
+  logger: Logger,
+): SessionNotification[] {
+  if (typeof content === "string") {
+    return [
+      {
+        sessionId,
+        update: {
+          sessionUpdate: role === "assistant" ? "agent_message_chunk" : "user_message_chunk",
+          content: {
+            type: "text",
+            text: content,
+          },
+        },
+      },
+    ];
+  }
+
+  const output: SessionNotification[] = [];
+  // Only handle the first chunk for streaming; extend as needed for batching
+  for (const chunk of content) {
+    let update: SessionNotification["update"] | null = null;
+    switch (chunk.type) {
+      case "text":
+      case "text_delta":
+        update = {
+          sessionUpdate: role === "assistant" ? "agent_message_chunk" : "user_message_chunk",
+          content: {
+            type: "text",
+            text: chunk.text,
+          },
+        };
+        break;
+      case "image":
+        update = {
+          sessionUpdate: role === "assistant" ? "agent_message_chunk" : "user_message_chunk",
+          content: {
+            type: "image",
+            data: chunk.source.type === "base64" ? chunk.source.data : "",
+            mimeType: chunk.source.type === "base64" ? chunk.source.media_type : "",
+            uri: chunk.source.type === "url" ? chunk.source.url : undefined,
+          },
+        };
+        break;
+      case "thinking":
+      case "thinking_delta":
+        update = {
+          sessionUpdate: "agent_thought_chunk",
+          content: {
+            type: "text",
+            text: chunk.thinking,
+          },
+        };
+        break;
+      case "tool_use":
+      case "server_tool_use":
+      case "mcp_tool_use": {
+        toolUseCache[chunk.id] = chunk;
+        if (chunk.name === "TodoWrite") {
+          // @ts-expect-error - sometimes input is empty object
+          if (Array.isArray(chunk.input.todos)) {
+            update = {
+              sessionUpdate: "plan",
+              entries: planEntries(chunk.input as { todos: ClaudePlanEntry[] }),
+            };
+          }
+        } else {
+          // Register hook callback to receive the structured output from the hook
+          registerHookCallback(chunk.id, {
+            onPostToolUseHook: async (toolUseId, toolInput, toolResponse) => {
+              const toolUse = toolUseCache[toolUseId];
+              if (toolUse) {
+                const update: SessionNotification["update"] = {
+                  toolCallId: toolUseId,
+                  sessionUpdate: "tool_call_update",
+                };
+                await handler.sessionUpdate({
+                  sessionId,
+                  update,
+                });
+              } else {
+                logger.error(
+                  `[claude-code-acp] Got a tool response for tool use that wasn't tracked: ${toolUseId}`,
+                );
+              }
+            },
+          });
+
+          let rawInput;
+          try {
+            rawInput = JSON.parse(JSON.stringify(chunk.input));
+          } catch {
+            // ignore if we can't turn it to JSON
+          }
+          update = {
+            toolCallId: chunk.id,
+            sessionUpdate: "tool_call",
+            rawInput,
+            status: "pending",
+            ...toolInfoFromToolUse(chunk),
+          };
+        }
+        break;
+      }
+
+      case "tool_result":
+      case "tool_search_tool_result":
+      case "web_fetch_tool_result":
+      case "web_search_tool_result":
+      case "code_execution_tool_result":
+      case "bash_code_execution_tool_result":
+      case "text_editor_code_execution_tool_result":
+      case "mcp_tool_result": {
+        const toolUse = toolUseCache[chunk.tool_use_id];
+        if (!toolUse) {
+          logger.error(
+            `[claude-code-acp] Got a tool result for tool use that wasn't tracked: ${chunk.tool_use_id}`,
+          );
+          break;
+        }
+
+        if (toolUse.name !== "TodoWrite") {
+          update = {
+            toolCallId: chunk.tool_use_id,
+            sessionUpdate: "tool_call_update",
+            status: "is_error" in chunk && chunk.is_error ? "failed" : "completed",
+            ...toolUpdateFromToolResult(chunk, toolUseCache[chunk.tool_use_id]),
+          };
+        }
+        break;
+      }
+
+      case "document":
+      case "search_result":
+      case "redacted_thinking":
+      case "input_json_delta":
+      case "citations_delta":
+      case "signature_delta":
+      case "container_upload":
+        break;
+
+      default:
+        unreachable(chunk, logger);
+        break;
+    }
+    if (update) {
+      output.push({ sessionId, update });
+    }
+  }
+
+  return output;
+}
+
+export function streamEventToAcpNotifications(
+  message: SDKPartialAssistantMessage,
+  sessionId: SessionId,
+  toolUseCache: ToolUseCache,
+  handler: EventHandler,
+  logger: Logger,
+): SessionNotification[] {
+  const event = message.event;
+  switch (event.type) {
+    case "content_block_start":
+      return toAcpNotifications(
+        [event.content_block],
+        "assistant",
+        sessionId,
+        toolUseCache,
+        handler,
+        logger,
+      );
+    case "content_block_delta":
+      return toAcpNotifications(
+        [event.delta],
+        "assistant",
+        sessionId,
+        toolUseCache,
+        handler,
+        logger,
+      );
+    // No content
+    case "message_start":
+    case "message_delta":
+    case "message_stop":
+    case "content_block_stop":
+      return [];
+
+    default:
+      unreachable(event, logger);
+      return [];
+  }
+}
+
+export type ClaudePlanEntry = {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  activeForm: string;
+};
+
+export function planEntries(input: { todos: ClaudePlanEntry[] }): PlanEntry[] {
+  return input.todos.map((input) => ({
+    content: input.content,
+    status: input.status,
+    priority: "medium",
+  }));
+}
+
+/**
+ * Extra metadata that the agent provides for each tool_call / tool_update update.
+ */
+export type ToolUpdateMeta = {
+  claudeCode?: {
+    /* The name of the tool that was used in Claude Code. */
+    toolName: string;
+    /* The structured output provided by Claude Code. */
+    toolResponse?: unknown;
+  };
+};
+
+type ToolUseCache = {
+  [key: string]: {
+    type: "tool_use" | "server_tool_use" | "mcp_tool_use";
+    id: string;
+    name: string;
+    input: any;
+  };
+};

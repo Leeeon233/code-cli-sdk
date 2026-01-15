@@ -17,12 +17,14 @@
     "dist"
   ],
   "scripts": {
-    "dev": "tsx --env-file=.env src/index.ts",
+    "dev": "NODE_OPTIONS=--conditions=development tsx --env-file=.env src/index.ts",
     "build": "rollup -c rollup.config.ts --configPlugin typescript",
     "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.7",
-    "@code-cli-sdk/core": "workspace:*"
+    "@anthropic-ai/sdk": "^0.71.2",
+    "@code-cli-sdk/core": "workspace:*",
+    "diff": "^8.0.3"
   }
 }

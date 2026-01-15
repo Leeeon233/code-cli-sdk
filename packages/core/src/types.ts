@@ -1,18 +1,25 @@
-export type SessionId = string & {__brand: "sessionId"}
-export type ModelId = string & {_brand: "modelId"}
-export type ModeId = string & {_brand: "modeId"}
-
+export type SessionId = string & { __brand: "sessionId" }
+export type ModelId = string & { _brand: "modelId" }
+export type ModeId = string & { _brand: "modeId" }
+/**
+ * The sender or recipient of messages and data in a conversation.
+ */
+export type Role = "assistant" | "user";
 
 export type ContentBlock =
-  | (TextContent & {
-      type: "text";
+    | (TextContent & {
+        type: "text";
     })
-  | (ImageContent & {
-      type: "image";
+    | (ImageContent & {
+        type: "image";
     })
-  | (AudioContent & {
-      type: "audio";
-    })
+    | (AudioContent & {
+        type: "audio";
+    }) | (ResourceLink & {
+        type: "resource_link";
+    }) | (EmbeddedResource & {
+        type: "resource";
+    });
 
 export type Content = ContentBlock;
 export type ContentChunk = ContentBlock;
@@ -33,10 +40,124 @@ export type AudioContent = {
     mimeType: string;
 };
 
+/**
+ * A resource that the server is capable of reading, included in a prompt or tool call result.
+ */
+export type ResourceLink = {
+    /**
+     * The _meta property is reserved by ACP to allow clients and agents to attach additional
+     * metadata to their interactions. Implementations MUST NOT make assumptions about values at
+     * these keys.
+     *
+     * See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+     */
+    _meta?: {
+        [key: string]: unknown;
+    } | null;
+    annotations?: Annotations | null;
+    description?: string | null;
+    mimeType?: string | null;
+    name: string;
+    size?: bigint | null;
+    title?: string | null;
+    uri: string;
+};
 
-export type SessionUpdateNotification = {
+/**
+ * The contents of a resource, embedded into a prompt or tool call result.
+ */
+export type EmbeddedResource = {
+    /**
+     * The _meta property is reserved by ACP to allow clients and agents to attach additional
+     * metadata to their interactions. Implementations MUST NOT make assumptions about values at
+     * these keys.
+     *
+     * See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+     */
+    _meta?: {
+        [key: string]: unknown;
+    } | null;
+    annotations?: Annotations | null;
+    resource: EmbeddedResourceResource;
+};
+
+/**
+ * Resource content that can be embedded in a message.
+ */
+export type EmbeddedResourceResource = TextResourceContents | BlobResourceContents;
+
+/**
+ * Text-based resource contents.
+ */
+export type TextResourceContents = {
+    /**
+     * The _meta property is reserved by ACP to allow clients and agents to attach additional
+     * metadata to their interactions. Implementations MUST NOT make assumptions about values at
+     * these keys.
+     *
+     * See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+     */
+    _meta?: {
+        [key: string]: unknown;
+    } | null;
+    mimeType?: string | null;
+    text: string;
+    uri: string;
+};
+
+/**
+ * Binary resource contents.
+ */
+export type BlobResourceContents = {
+    /**
+     * The _meta property is reserved by ACP to allow clients and agents to attach additional
+     * metadata to their interactions. Implementations MUST NOT make assumptions about values at
+     * these keys.
+     *
+     * See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+     */
+    _meta?: {
+        [key: string]: unknown;
+    } | null;
+    blob: string;
+    mimeType?: string | null;
+    uri: string;
+};
+
+/**
+ * Optional annotations for the client. The client can use annotations to inform how objects are used or displayed
+ */
+export type Annotations = {
+    /**
+     * The _meta property is reserved by ACP to allow clients and agents to attach additional
+     * metadata to their interactions. Implementations MUST NOT make assumptions about values at
+     * these keys.
+     *
+     * See protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)
+     */
+    _meta?: {
+        [key: string]: unknown;
+    } | null;
+    audience?: Array<Role> | null;
+    lastModified?: string | null;
+    priority?: number | null;
+};
+
+export type SessionNotification = {
     sessionId: SessionId;
-    update: SessionUpdate
+    update: SessionUpdate | (Plan & {
+        sessionUpdate: "plan";
+    }) | (AvailableCommandsUpdate & {
+        sessionUpdate: "available_commands_update";
+    }) | (CurrentModeUpdate & {
+        sessionUpdate: "current_mode_update";
+    })
+    // | (ConfigOptionUpdate & {
+    //     sessionUpdate: "config_option_update";
+    // })
+    | (TitleGeneratedUpdate & {
+        sessionUpdate: "title_generated";
+    });
 }
 
 export type SessionUpdate = (ContentChunk & {
@@ -99,11 +220,26 @@ export type ToolCall = {
  * Tool calls can produce different types of content including
  * standard content blocks (text, images) or file diffs.
  */
-export type ToolCallContent = (Content & {
-    type: "content";
-}) | (Diff & {
-    type: "diff";
-})
+export type ToolCallContent =
+    | {
+        /**
+         * Discriminator for tool call content entries.
+         *
+         * Note: `Content` already uses `type` for block kinds (e.g. "text"),
+         * so tool call entries wrap `Content` instead of intersecting with it.
+         */
+        type: "content";
+        /**
+         * Standard content block (text/image/audio) produced by the tool call.
+         */
+        content: Content;
+    }
+    | (Diff & {
+        /**
+         * Discriminator for tool call content entries.
+         */
+        type: "diff";
+    })
 /**
  * Unique identifier for a tool call within a session.
  */
@@ -252,10 +388,10 @@ export type CurrentModeUpdate = {
 * Available commands are ready or have changed
 */
 export type AvailableCommandsUpdate = {
-   /**
-    * Commands the agent can execute
-    */
-   availableCommands: Array<AvailableCommand>;
+    /**
+     * Commands the agent can execute
+     */
+    availableCommands: Array<AvailableCommand>;
 };
 
 /**
@@ -335,18 +471,18 @@ export type Diff = {
  *
  */
 export type RequestPermissionRequest = {
-     /**
-     * Available permission options for the user to choose from.
+    /**
+    * Available permission options for the user to choose from.
+    */
+    options: Array<PermissionOption>;
+    /**
+     * The session ID for this request.
      */
-     options: Array<PermissionOption>;
-     /**
-      * The session ID for this request.
-      */
-     sessionId: SessionId;
-     /**
-      * Details about the tool call requiring permission.
-      */
-     toolCall: ToolCallUpdate;
+    sessionId: SessionId;
+    /**
+     * Details about the tool call requiring permission.
+     */
+    toolCall: ToolCallUpdate;
 }
 
 /**
@@ -390,11 +526,11 @@ export type TitleGeneratedUpdate = {
 }
 
 export type StopReason =
-  | "end_turn"
-  | "max_tokens"
-  | "max_turn_requests"
-  | "refusal"
-  | "cancelled";
+    | "end_turn"
+    | "max_tokens"
+    | "max_turn_requests"
+    | "refusal"
+    | "cancelled";
 
 export type PromptResponse = {
     sessionId: SessionId;
@@ -411,7 +547,7 @@ export type ModelUsage = {
     cacheReadInputTokens: number,
     cacheCreationInputTokens: number,
     webSearchRequests: number,
-    costUSD:number,
+    costUSD: number,
     contextWindow: number,
     maxOutputTokens: number
 }

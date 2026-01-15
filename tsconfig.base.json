@@ -1,9 +1,6 @@
 {
   "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@code-cli-sdk/*": ["packages/*/src/index.ts"]
-    },
+    "customConditions": ["development"],
     "target": "esnext",
     "module": "esnext",
     "lib": ["es2022", "esnext", "dom"],

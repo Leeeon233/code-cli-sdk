@@ -1,4 +1,3 @@
-
-class ClaudeCodeProvider{
-    constructor(){}
+export class GeminiProvider {
+  constructor() {}
 }
