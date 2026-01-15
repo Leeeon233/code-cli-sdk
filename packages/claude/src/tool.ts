@@ -71,22 +71,26 @@ export function toolUpdateFromToolResult(
     switch (toolUse?.name) {
         case "Read":
         case acpToolNames.read:
-            if (Array.isArray(toolResult.content) && toolResult.content.length > 0) {
-                return {
-                    content: toolResult.content.map((content: any) => ({
-                        type: "content",
-                        content:
-                            content.type === "text"
-                                ? {
-                                    type: "text",
-                                    text: markdownEscape(content.text.replace(SYSTEM_REMINDER, "")),
-                                }
-                                : content,
-                    })),
-                };
-            } else if (typeof toolResult.content === "string" && toolResult.content.length > 0) {
-                return {
-                    content: [
+	            if (Array.isArray(toolResult.content) && toolResult.content.length > 0) {
+	                return {
+	                    content: toolResult.content.map(
+	                        (content: any): ToolCallContent => ({
+	                            type: "content",
+	                            content:
+	                                content.type === "text"
+	                                    ? {
+	                                        type: "text",
+	                                        text: markdownEscape(
+	                                            content.text.replace(SYSTEM_REMINDER, ""),
+	                                        ),
+	                                    }
+	                                    : content,
+	                        }),
+	                    ),
+	                };
+	            } else if (typeof toolResult.content === "string" && toolResult.content.length > 0) {
+	                return {
+	                    content: [
                         {
                             type: "content",
                             content: {

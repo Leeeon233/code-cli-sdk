@@ -1,5 +1,5 @@
-import { Capability, ContentBlock, EventHandler, Mode, ModeId, ModelId, ModelInfo, NewSessionRequest, PromptResponse, Provider, ProviderOptions, Session, SessionId, Pushable, AvailableCommand, ToolCallContent, ToolKind, ToolCallLocation, Logger, RequestError, SessionNotification, PlanEntry } from "@code-cli-sdk/core"
-import { query, Query, Options, PermissionResult, SDKUserMessage, PermissionMode, PermissionUpdate, SDKMessage, SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
+import { Capability, ContentBlock, EventHandler, Mode, ModeId, ModelId, ModelInfo, NewSessionRequest, PromptResponse, Provider, ProviderOptions, Session, SessionId, Pushable, AvailableCommand, Logger, RequestError, SessionNotification, PlanEntry, emitUpdate } from "@code-cli-sdk/core"
+import { query, Query, Options, PermissionResult, SDKUserMessage, PermissionMode, PermissionUpdate, SDKPartialAssistantMessage } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { BetaContentBlock, BetaRawContentBlockDelta } from "@anthropic-ai/sdk/resources/beta.mjs";
@@ -36,6 +36,13 @@ export class ClaudeCodeSession implements Session {
   }
 
   async prompt(prompt: ContentBlock[]): Promise<PromptResponse> {
+    const result = this.promptInternal(prompt);
+    // TODO: usage
+    // TODO: quota
+    return result
+  }
+
+  async promptInternal(prompt: ContentBlock[]): Promise<PromptResponse> {
     const input = this.options.input;
     const query = this.query;
     input.push(promptToClaude(prompt, this.id));
@@ -110,7 +117,7 @@ export class ClaudeCodeSession implements Session {
             this.handler,
             this.logger
           )) {
-            await this.handler.sessionUpdate(notification);
+            await emitUpdate(this.handler, notification)
           }
           break;
         }
@@ -119,7 +126,6 @@ export class ClaudeCodeSession implements Session {
           if (this.cancelled) {
             break;
           }
-
           // Slash commands like /compact can generate invalid output... doesn't match
           // their own docs: https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-slash-commands#%2Fcompact-compact-conversation-history
           if (
@@ -173,7 +179,7 @@ export class ClaudeCodeSession implements Session {
             this.handler,
             this.logger,
           )) {
-            await this.handler.sessionUpdate(notification);
+            await emitUpdate(this.handler, notification)
           }
           break;
         }
@@ -663,10 +669,8 @@ export function toAcpNotifications(
         sessionId,
         update: {
           sessionUpdate: role === "assistant" ? "agent_message_chunk" : "user_message_chunk",
-          content: {
-            type: "text",
-            text: content,
-          },
+          type: "text",
+          text: content,
         },
       },
     ];
@@ -681,31 +685,25 @@ export function toAcpNotifications(
       case "text_delta":
         update = {
           sessionUpdate: role === "assistant" ? "agent_message_chunk" : "user_message_chunk",
-          content: {
-            type: "text",
-            text: chunk.text,
-          },
+          type: "text",
+          text: chunk.text,
         };
         break;
       case "image":
         update = {
           sessionUpdate: role === "assistant" ? "agent_message_chunk" : "user_message_chunk",
-          content: {
-            type: "image",
-            data: chunk.source.type === "base64" ? chunk.source.data : "",
-            mimeType: chunk.source.type === "base64" ? chunk.source.media_type : "",
-            uri: chunk.source.type === "url" ? chunk.source.url : undefined,
-          },
+          type: "image",
+          data: chunk.source.type === "base64" ? chunk.source.data : undefined,
+          mimeType: chunk.source.type === "base64" ? chunk.source.media_type : "",
+          uri: chunk.source.type === "url" ? chunk.source.url : undefined,
         };
         break;
       case "thinking":
       case "thinking_delta":
         update = {
           sessionUpdate: "agent_thought_chunk",
-          content: {
-            type: "text",
-            text: chunk.thinking,
-          },
+          type: "text",
+          text: chunk.thinking,
         };
         break;
       case "tool_use":
@@ -723,7 +721,7 @@ export function toAcpNotifications(
         } else {
           // Register hook callback to receive the structured output from the hook
           registerHookCallback(chunk.id, {
-            onPostToolUseHook: async (toolUseId, toolInput, toolResponse) => {
+            onPostToolUseHook: async (toolUseId, _toolInput, _toolResponse) => {
               const toolUse = toolUseCache[toolUseId];
               if (toolUse) {
                 const update: SessionNotification["update"] = {

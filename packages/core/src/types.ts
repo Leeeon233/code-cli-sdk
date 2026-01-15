@@ -388,6 +388,7 @@ export type CurrentModeUpdate = {
 * Available commands are ready or have changed
 */
 export type AvailableCommandsUpdate = {
+    sessionId: SessionId;
     /**
      * Commands the agent can execute
      */
@@ -553,6 +554,7 @@ export type ModelUsage = {
 }
 
 export type UsageUpdate = {
+    sessionId: SessionId;
     inputTokens: number;
     outputTokens: number;
     cacheReadInputTokens: number;
