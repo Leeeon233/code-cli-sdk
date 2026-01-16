@@ -18,7 +18,7 @@ export interface EventHandler {
     modeUpdate(update: CurrentModeUpdate): Promise<void>;
     availableCommandsUpdate(update: AvailableCommandsUpdate): Promise<void>;
     usageUpdate(update: UsageUpdate): Promise<void>;
-    error(error: Error): Promise<void>
+    error(error: Error): Promise<void>;
     // TODO: 
     // ConfigOptionUpdate
 }

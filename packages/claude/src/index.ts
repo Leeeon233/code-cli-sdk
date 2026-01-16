@@ -59,6 +59,7 @@ interface ClaudeCodeSessionOptions {
   input: Pushable<SDKUserMessage>
   sessionId: SessionId;
   handler: EventHandler;
+  abortController: AbortController;
 }
 
 export class ClaudeCodeSession implements Session {
@@ -262,7 +263,10 @@ export class ClaudeCodeSession implements Session {
 
   async close(): Promise<void> {
     if (this.cancelled) return;
-    await this.cancel();
+    this.cancelled = true;
+    await this.query.interrupt();
+    this.options.input.end();
+    this.options.abortController.abort();
   }
 
   async getAvailableModels(): Promise<ModelInfo[]> {
@@ -384,7 +388,8 @@ export class ClaudeCodeProvider implements Provider {
     } else {
       sessionId = randomUUID() as SessionId;
     }
-    const options = this.buildOptions(sessionId, cwd, resume, fork);
+    const abortController = new AbortController();
+    const options = this.buildOptions(sessionId, abortController, cwd, resume, fork);
     const input = new Pushable<SDKUserMessage>();
     const q = query({
       prompt: input,
@@ -394,7 +399,8 @@ export class ClaudeCodeProvider implements Provider {
       sessionId,
       query: q,
       input,
-      handler: this.options.handler
+      handler: this.options.handler,
+      abortController,
     })
     this.sessions[sessionId] = session;
     return session;
@@ -562,7 +568,7 @@ export class ClaudeCodeProvider implements Provider {
     }
   }
 
-  private buildOptions(sessionId: SessionId, cwd?: string, resume?: SessionId, fork?: boolean) {
+  private buildOptions(sessionId: SessionId, abortController: AbortController, cwd?: string, resume?: SessionId, fork?: boolean) {
     // system prompt
     let systemPrompt: Options["systemPrompt"] = { type: "preset", preset: "claude_code" };
     if (this.options.systemPrompt) {
@@ -590,6 +596,7 @@ export class ClaudeCodeProvider implements Provider {
       systemPrompt,
       settingSources: ["user", "project", "local"],
       permissionMode: "default",
+      abortController,
       stderr: (err) => this.options.handler.error(new Error(err)),
       cwd,
       includePartialMessages: true,
